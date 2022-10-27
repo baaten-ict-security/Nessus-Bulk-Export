@@ -10,5 +10,8 @@ Before you can use this script you need to obtain a secretKey and accessKey from
 
 Also make sure to fill in the correct Nessus hostname or IP in the **$apibaseURI**.
 
-Authors: Dennis Baaten (Baaten ICT Security) and Ferry Niemeijer
-Thanks to: Johan Moritz (VeriftyIT)
+# Authors
+* Dennis Baaten (Baaten ICT Security)
+* Ferry Niemeijer
+
+Special thanks to Johan Moritz (VeriftyIT)
