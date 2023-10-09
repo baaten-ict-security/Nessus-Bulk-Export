@@ -10,6 +10,10 @@ Before you can use this script you need to obtain a secretKey and accessKey from
 
 Also make sure to fill in the correct Nessus hostname or IP in the **$apibaseURI**.
 
+# Limitations and known issues
+* This script does not work with scan history due to a limitation of the Nessus API. While this feature is documented by Tenable in the /api/ path of you Nessus Professional instance, it does not work. By default the most recent (current) scan is downloaded.
+* On the 9th of September 2023 I discovered a bug in Nessus Professional: if you use a forward slash in the name of your scan, the export of a .Nessus (XML) file failes for both the API and the GUI. The GUI shows a '500 - Internal Server Error'. The issue was reported to Tenable.
+
 # Authors
 * Dennis Baaten (Baaten ICT Security)
 * Ferry Niemeijer
