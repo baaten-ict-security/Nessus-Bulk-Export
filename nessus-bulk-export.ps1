@@ -1,217 +1,134 @@
-##########################################################################################################
-## HSIC: Host-based Security Info Collector
-## Version: 2.2 (20240124)
-## Author: Dennis Baaten (Baaten ICT Security)
+﻿## Nessus Bulk Export (NBE)
 ##
-#### DISCRIPTION
-## Powershell script that generates a TXT file with security related information about a specific host. 
-## Used in a BYOD / unmanaged device context for manually checking Windows system compliance with a specific set of requirements. ISO 27001 proof. 
-## Needs to run with administrative privileges.
-## 
-#### INSTRUCTIONS
-## 1. Run "Windows PowerShell" app "as Administrator" from Windows start menu
-## 2. In PowerShell run "Get-ExecutionPolicy" to view your current PowerShell Execution Policy (Windows default: restricted)
-## 3. In PowerShell run "Set-ExecutionPolicy Unrestricted" to be able to run this script.
-## 4. Go to the directory containing this script and execute it in PowerShell: ".\HSIC.ps1"
-## 5. In PowerShell run "Set-ExecutionPolicy Restricted" to restore the PowerShell Execution Policy to it's original state (might be different than the current default)
+## When performing vulnerability assessments using Nessus Professional, it is 
+## likely you end up with a lot of separate scans. Nessus does not support
+## bulk exporting all scans, so you need to manually export each scan. 
+## This is annoying and a lot of work. This PowerShell script can be used for bulk
+## downloading all scan results (in .nessus format) from a specific Nessus folder.
 ##
-#### VERSION HISTORY
-## 1.0: 
-##    * original version
-## 2.0:
-##    * some optimizations of the code
-##    * added system identification information
-##    * do a better job getting relevant user information
-## 2.1:
-##    * some simplifications
-##    * created a workaround for this long existing bug: https://github.com/PowerShell/PowerShell/issues/2996
-##    * converted from WMI to CIM cmdlet to circumvent strange issue that occurs on some systems when getting the 'currently logged in users'
-## 2.2:	
-##    * since this is a script that feeds an interactive commandline: load functions before use.
+## GETTING STARTED / READ THIS FIRST:
+## Before you can use this script you need to obtain a secretKey and accessKey 
+## from Nessus. This is a two step process, for which you use open source API
+## client Insomnia (https://insomnia.rest/):
 ##
-##########################################################################################################
-
-# Present elevation prompt to run with administrative privileges
-param([switch]$Elevated)
-
-function Test-Admin {
-    $currentUser = New-Object Security.Principal.WindowsPrincipal $([Security.Principal.WindowsIdentity]::GetCurrent())
-    $currentUser.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-}
-
-if ((Test-Admin) -eq $false)  {
-    if ($elevated) {
-        # tried to elevate, did not work, aborting
-    } else {
-        Start-Process powershell.exe -Verb RunAs -ArgumentList ('-noprofile -noexit -file "{0}" -elevated' -f ($myinvocation.MyCommand.Definition))
-    }
-    exit
-}
+## 1. 
+## POST request to "/session" with the follwing JSON body: {"username":"yourusernamehere","password":"yourpasswordhere"}
+## The response contains a token, which you need for step 2.
+##
+## 2.
+## PUT request to "/session/keys" wit the following header: X-Cookie: token=yourtokenhere
+## The response contains an AccessKey and a SecretKey. Use these in the script. 
+##
+## Also make sure to fill in the correct Nessus hostname or IP in the $apibaseURI.
+##
+## Authors: Dennis Baaten (Baaten ICT Security) and Ferry Niemeijer
+## Thanks to: Johan Moritz (VeriftyIT)
 
 Clear
 
-# Functions
-function Get-LocalAdmins {
+## Define some variables for later use
 
-    <#
-        .SYNOPSIS
-        Replacement for non-functional Get-LocalgroupMember, which has an unfixed issue with broad scope of impact.
-        Issue here: https://github.com/PowerShell/PowerShell/issues/2996
-        Credits:
-        @ganlbarone on GitHub for the base code
-        @ConfigMgrRSC on Github for the localisation supplement
+# Acesskey and Secretkey for Nessus authentication
+$AccessKey = "your-acceskey-here"
+$SecretKey = "your-secretkey-here"
 
-        .DESCRIPTION
-        The script uses ADSI to fetch all members of the local Administrators group.
-        MSFT are aware of this issue, but have closed it without a fix.
-        It will output the SID of AzureAD objects such as roles, groups and users,
-        and any others which cannot be resolved.
+# Create authentication header for GET and POST requests
+$Headers =@{ "X-ApiKeys" = "accessKey=$AccessKey ;secretKey=$SecretKey " }
+$Body ='{"format":"nessus"}'
 
-        Designed to run from the Intune MDM and thus accepts no parameters.
+# Define API URI's
+$apibaseURI = 'https://nessus-hostname-or-ip-here:8834'
+$foldersURI = $apibaseURI+'/folders'
+$fileidURI = $apibaseURI+'/scans/'
 
-        .EXAMPLE
-        $results = Get-localAdmins
-        $results
-
-        The above will store the output of the function in the $results variable, and
-        output the results to console
-
-        .OUTPUTS
-        System.Management.Automation.PSCustomObject
-        Name        MemberType   Definition
-        ----        ----------   ----------
-        Equals      Method       bool Equals(System.Object obj)
-        GetHashCode Method       int GetHashCode()
-        GetType     Method       type GetType()
-        ToString    Method       string ToString()
-        Computer    NoteProperty string Computer=Workstation1
-        Domain      NoteProperty System.String Domain=Contoso
-        User        NoteProperty System.String User=Administrator
-    #>
-
-    [CmdletBinding()]
-
-    $GroupSID='S-1-5-32-544'
-    [string]$Groupname = (get-localgroup -SID $GroupSID)[0].Name
-    
-    $group = [ADSI]"WinNT://$env:COMPUTERNAME/$Groupname"
-        $admins = $group.Invoke('Members') | ForEach-Object {
-            $path = ([adsi]$_).path
-            $memberSID = $(Split-Path $path -Leaf)
-            $AadObjectID = Convert-AzureAdSidToObjectId -Sid $memberSID -ErrorAction SilentlyContinue
-            [pscustomobject]@{
-                Computer = $env:COMPUTERNAME
-                Domain = $(Split-Path (Split-Path $path) -Leaf)
-                User = $(Split-Path $path -Leaf)
-                ObjectID = $AadObjectID
-            }
-        }
-    return $admins
-    
+#UTC epoch adjustment for current timezone
+$timezone = (Get-TimeZone)
+if ($timezone.SupportsDaylightSavingTime -eq $True) {
+    $timeadjust =  ($timezone.BaseUtcOffset.TotalSeconds + 3600)
+}
+else {
+    $timeadjust = ($timezone.BaseUtcOffset.TotalSeconds)
 }
 
-function Convert-AzureAdSidToObjectId {
-    <#
-    .SYNOPSIS
-    Convert a Azure AD SID to Object ID
-     
-    .DESCRIPTION
-    Converts an Azure AD SID to Object ID.
-    Author: Oliver Kieselbach (oliverkieselbach.com)
-    The script is provided "AS IS" with no warranties.
-     
-    .PARAMETER Sid
-    The SID to convert
-    #>
-    
-    [CmdletBinding()]
-    param([String] $Sid)
-
-    $text = $sid.Replace('S-1-12-1-', '')
-    $array = [UInt32[]]$text.Split('-')
-
-    $bytes = New-Object 'Byte[]' 16
-    [Buffer]::BlockCopy($array, 0, $bytes, 0, 16)
-    [Guid]$guid = $bytes
-
-    return $guid
-}
-
-# Let user select output directory
+## Let user select the directory to export all files to
 $application = New-Object -ComObject Shell.Application
 While (!$outputdir) {
-    $outputdir = ($application.BrowseForFolder(0, 'Host-based Security Info Collector: where do you want to store HSIC-output.txt?', 0)).Self.Path 
+    $outputdir = ($application.BrowseForFolder(0, 'Nessus Bulk Export Script: where do you want to store the scan exports? ', 0)).Self.Path 
 }
 
-$runtime = Get-Date -Format "yyyyMMdd_HHmm"
-$file = 'HSIC-output-' + $runtime + '.txt'
+# Force TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$filename = "$outputdir\$file"
-Set-Content -Path $filename -Value "Host-based Security Info Collector"
-Add-Content -Path $filename $(Get-Date -Format "yyyy/MM/dd HH:mm K")
+# Get all folders
+$folders = Invoke-RestMethod -Method GET -URI $foldersURI -Headers $Headers
 
-# System identification
-Write-Host "`r`n# Getting System identifiers"
-Add-Content -Path $filename -Value "`r`n###### SYSTEM IDENTIFICATION ######"
-$env:COMPUTERNAME | Out-String -Width 1000 | Add-Content -Path $filename # System name
-wmic path win32_Processor get DeviceID,Name,ProcessorID,Caption | Out-String -Width 1000 | Add-Content -Path $filename # CPU Info
-Get-WmiObject win32_networkadapterconfiguration | Where-Object { $_.MacAddress -ne $null } | Select-Object Description, MacAddress | Out-String -Width 1000 | Add-Content -Path $filename # Get all network adapters with a MacAddress
+Write-host "Nessus folder list:"
+foreach ($folder in $folders.folders) { 
+    Write-host $folder.id "-"$folder.name
+}
 
-# Get Antivirus status
-Write-Host "`r`n# Getting Antivirus status"
-Add-Content -Path $filename -Value "`r`n###### ANTIVIRUS ######"
-Get-WmiObject -Namespace root\SecurityCenter2 -Class AntiVirusProduct | Select displayName, productState, instanceGUID | Out-String -Width 1000 | Add-Content -Path $filename
+Write-host "`r`n"
 
-# Get Windows Firewall status (not third party) 
-Write-Host "`r`n# Getting firewall status"
-Add-Content -Path $filename -Value "`r`n###### WINDOWS FIREWALL STATUS ######"
-(Get-NetFirewallProfile) | Out-String -Width 1000 | Add-Content -Path $filename
-# Get Firewall products (including third party)
-Add-Content -Path $filename -Value "`r`n###### FIREWALL PRODUCTS ######"
-Get-WmiObject -Namespace root\SecurityCenter2 -Class FirewallProduct | Select displayName, productState, instanceGUID | Out-String -Width 1000 | Add-Content -Path $filename
+# Read the folder ID entered by the user
+[int] $foldernr = Read-Host -Prompt "Enter the ID of the folder to fetch all scan reports in .nessus format"
+$scansURI = $apibaseURI+"/scans?folder_id=$foldernr"
 
-# Get Bitlocker status
-Write-Host "`r`n# Getting Bitlocker status"
-Add-Content -Path $filename -Value "`r`n###### BITLOCKER ######"
-manage-bde -status | Add-Content -Path $filename
+# Get all scans within selected folder
+$scans = Invoke-RestMethod -Method GET -URI $scansURI -Headers $Headers 
 
-# Get Operating System status
-Write-Host "`r`n# Getting OS information"
-Add-Content -Path $filename -Value "`r`n###### OPERATING SYSTEM ######"
-(Get-WMIObject win32_operatingsystem) | Select Name | Out-String -Width 1000 | Add-Content -Path $filename
+Write-host "`r`n"
+Write-host "Scans in selected folder" $foldernr ":"
+foreach ($scan in $scans.scans) { 
+    #Get the scan's last_modification_date epoch (which is UTC) and convert it to local timezone
+    $lastmoddate = (([System.DateTimeOffset]::FromUnixTimeSeconds($scan.last_modification_date+$timeadjust)).DateTime).ToString("yyMMdd_HHmm")
+    Write-host $scan.id "-" $scan.name "-" $lastmoddate
+}
 
-# Get Windows update status
-Write-Host "`r`n# Getting Windows Update Status (takes a while)"
-Add-Content -Path $filename -Value "`r`n###### WINDOWS UPDATE STATUS ######"
-$UpdateSession = New-Object -ComObject Microsoft.Update.Session
-$UpdateSearcher = $UpdateSession.CreateupdateSearcher()
-$Updates = @($UpdateSearcher.Search("IsHidden=0 and IsInstalled=0").Updates)
-$Updates | Select-Object Title, IsMandatory, IsInstalled | Out-String  -Width 1000 | Add-Content -Path $filename
+Write-host "`r`n"
 
-# Get installed software + versions
-Write-Host "`r`n# Getting versions of installed software"
-Add-Content -Path $filename -Value "`r`n###### INSTALLED SOFTWARE + VERSION ######"
-Get-WmiObject -Class Win32_Product | Select Name, Version | Out-String -Width 1000 | Add-Content -Path $filename
+#Get file ID's of scans
 
-# User status
-Write-Host "`r`n# Getting user information"
-Add-Content -Path $filename -Value "`r`n###### USER INFORMATION ######"
+$fileids = @()
+Foreach ($scan in $scans.scans) { 
+    if ($scan.status -eq "completed") {
+        $URI = $fileidURI + $scan.id + "/export"
+        $fileid = Invoke-RestMethod -Method POST -URI $URI -Headers $Headers -Body $Body -ContentType application/json
+    
+        $obj = New-Object psobject -Property @{            
+                scanid = $scan.id
+                fileid = $fileid.file 
+                scanname = $scan.name
+                lastmoddate = (([System.DateTimeOffset]::FromUnixTimeSeconds($scan.last_modification_date+$timeadjust)).DateTime).ToString("yyMMdd_HHmm")
+            }
+        Clear-Variable fileid
+        $fileids += $obj            
+    } 
+}
 
-Add-Content -Path $filename -Value "`r`n# All known users:"
-Get-LocalUser | Select Name, Enabled | Out-String -Width 1000 | Add-Content -Path $filename
+# Check export status and download when status is "Ready".
+foreach ($file in $fileids) {
+    $statusURI = $fileidURI + $file.scanid + "/export/" + $file.fileid + "/status"
+    $downloadURI = $fileidURI + $file.scanid + "/export/" + $file.fileid + "/download"
 
-Add-Content -Path $filename -Value "`r`n# Users with Admin privileges:"
-Get-LocalAdmins | Out-String -Width 1000 | Add-Content -Path $filename
+    $filestatus = Invoke-RestMethod -Method GET -URI $statusURI -Headers $Headers
 
-Add-Content -Path $filename -Value "`r`n# Current logged in users:"
-$loggedinuser = Get-CimInstance Win32_Process -Filter "name = 'explorer.exe'"
-Invoke-CimMethod -InputObject $loggedinuser -MethodName GetOwner | Select User | Out-String -Width 1000 | Add-Content -Path $filename
+    while ( $success -ne "Yes" ) {         
+        if ($filestatus.status -eq "ready") { 
+            $success = "Yes"
+            $exporttime = Get-Date -Format "yyMMdd_HHmm"
+            $filename = 'NBE - ' + $file.scanid + ' - ' + $file.scanname + ' - ' + $file.lastmoddate
 
-Add-Content -Path $filename -Value "`r`n# User running this script:"
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
-$userrunningscript = $principal.Identity.Name
-$userrunningscript | Out-String -Width 1000 | Add-Content -Path $filename
+            Invoke-WebRequest -Method GET -Headers $Headers -Uri $downloadURI -UseBasicParsing -OutFile $outputdir\$filename".nessus"
+            write-host "Export finished for scan" $file.scanid: $filename".nessus"
+        } else { 
+            write-host $file.scanname "has status"$filestatus.status". Will try again in 10 seconds"
+            sleep -Seconds 10 
+            $filestatus = Invoke-RestMethod -Method GET -URI $statusURI -Headers $Headers
+        }
+    }
+    Clear-Variable success
+    Clear-Variable downloadURI
+}
 
-# Finished
-Write-Host "`r`n# Finished. Output file stored at:" $filename
+Write-host "`r`n***Finished exporting all scan reports***" 
+ 
