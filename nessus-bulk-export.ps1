@@ -1,4 +1,5 @@
 ﻿## Nessus Bulk Export (NBE)
+## Version: 1.0
 ##
 ## When performing vulnerability assessments using Nessus Professional, it is 
 ## likely you end up with a lot of separate scans. Nessus does not support
